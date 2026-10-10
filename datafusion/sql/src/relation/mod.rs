@@ -21,7 +21,8 @@ use crate::planner::{ContextProvider, PlannerContext, SqlToRel};
 
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{
-    DFSchema, Diagnostic, Result, Span, Spans, TableReference, not_impl_err, plan_err,
+    DFSchema, Diagnostic, HashMap, Result, Span, Spans, TableReference, not_impl_err,
+    plan_err,
 };
 use datafusion_expr::builder::subquery_alias;
 use datafusion_expr::planner::{
@@ -91,6 +92,58 @@ impl<S: ContextProvider> RelationPlannerContext for SqlToRelRelationContext<'_, 
 }
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
+    /// Returns an error if two relations in the same `FROM` scope are visible
+    /// under the same name, with a [`Diagnostic`] pointing at both of them.
+    pub(crate) fn check_duplicate_relation_names<'a>(
+        &self,
+        relations: impl IntoIterator<Item = &'a TableFactor>,
+    ) -> Result<()> {
+        let mut seen: HashMap<String, Option<Span>> = HashMap::new();
+        for relation in relations {
+            let Some((name, span)) = self.extract_relation_name(relation)? else {
+                continue;
+            };
+            if let Some(first_span) = seen.get(&name) {
+                let msg = format!("table name {name:?} specified more than once");
+                let mut diagnostic = Diagnostic::new_error(&msg, span);
+                if let Some(first_span) = *first_span {
+                    diagnostic =
+                        diagnostic.with_note("first defined here", Some(first_span));
+                }
+                return plan_err!("{msg}").map_err(|e| e.with_diagnostic(diagnostic));
+            }
+            seen.insert(name, span);
+        }
+        Ok(())
+    }
+
+    /// Returns the name a relation is visible under in its `FROM` scope (its
+    /// alias, or the full table reference if unaliased), and the span of that name.
+    fn extract_relation_name(
+        &self,
+        relation: &TableFactor,
+    ) -> Result<Option<(String, Option<Span>)>> {
+        match relation {
+            TableFactor::Table { alias: Some(a), .. }
+            | TableFactor::Derived { alias: Some(a), .. }
+            | TableFactor::Function { alias: Some(a), .. }
+            | TableFactor::UNNEST { alias: Some(a), .. }
+            | TableFactor::NestedJoin { alias: Some(a), .. } => {
+                let span = Span::try_from_sqlparser_span(a.name.span);
+                let name = self.ident_normalizer.normalize(a.name.clone());
+                Ok(Some((name, span)))
+            }
+            TableFactor::Table {
+                name, alias: None, ..
+            } => {
+                let span = Span::try_from_sqlparser_span(relation.span());
+                let table_ref = self.object_name_to_table_reference(name.clone())?;
+                Ok(Some((table_ref.to_string(), span)))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Create a `LogicalPlan` that scans the named relation.
     ///
     /// First tries any registered extension planners. If no extension handles

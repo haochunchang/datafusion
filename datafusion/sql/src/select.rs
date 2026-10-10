@@ -969,6 +969,13 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 self.plan_table_with_joins(input, planner_context)
             }
             _ => {
+                // Each entry checks its own joins in `plan_table_with_joins`;
+                // this also catches names repeated across comma-separated entries.
+                self.check_duplicate_relation_names(from.iter().flat_map(|t| {
+                    std::iter::once(&t.relation)
+                        .chain(t.joins.iter().map(|j| &j.relation))
+                }))?;
+
                 let mut from = from.into_iter();
 
                 let mut left = LogicalPlanBuilder::from({

@@ -35,13 +35,18 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         t: TableWithJoins,
         planner_context: &mut PlannerContext,
     ) -> Result<LogicalPlan> {
-        let mut left = if is_lateral(&t.relation) {
-            self.create_relation_subquery(t.relation, planner_context)?
+        self.check_duplicate_relation_names(
+            std::iter::once(&t.relation).chain(t.joins.iter().map(|j| &j.relation)),
+        )?;
+
+        let TableWithJoins { relation, joins } = t;
+        let mut left = if is_lateral(&relation) {
+            self.create_relation_subquery(relation, planner_context)?
         } else {
-            self.create_relation(t.relation, planner_context)?
+            self.create_relation(relation, planner_context)?
         };
         let old_outer_from_schema = planner_context.outer_from_schema();
-        for join in t.joins {
+        for join in joins {
             planner_context.extend_outer_from_schema(left.schema())?;
             left = self.parse_relation_join(left, join, planner_context)?;
         }
